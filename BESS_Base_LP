@@ -1,0 +1,59 @@
+from gurobipy import *
+import pandas as pd
+
+def optimal_schedule(prices,demands,power,capacity,pv):
+
+    m = Model("Scheduling Problem")
+    m.Params.LogToConsole = 0
+    data = {'initialSoc': capacity/2,
+            'capacity': capacity,
+            'dischargingEfficiency': 0.999,
+            'chargingEfficiency': 0.999,
+            'dischargeRate': power/2,
+            'chargeRate': power/2,
+            'demand': demands,
+            'importTariff': prices,
+            'pv': pv}
+    
+    Ts = range(len(prices))
+    index = [(t) for t in Ts]
+    
+    Import = m.addVars(index, lb=0)
+    bat_soc = m.addVars(index,lb=0,ub=data['capacity'])#,vtype=GRB.INTEGER)
+    import_to_bat = m.addVars(index, lb=0)#, vtype=GRB.INTEGER)
+    pv_to_bat = m.addVars(index, lb=0)#, vtype=GRB.INTEGER)
+    discharge_to_demand = m.addVars(index, lb=0,ub=data['dischargeRate'])#, vtype=GRB.INTEGER)
+    import_to_demand = m.addVars(index, lb=0)
+    pv_to_demand = m.addVars(index, lb=0)
+
+    m.addConstr((bat_soc[0] == data['initialSoc'] + import_to_bat[0] - discharge_to_demand[0]
+                 + pv_to_bat[0]), name='Soc_Initial')
+    
+    m.addConstrs((bat_soc[t] == bat_soc[t-1] + import_to_bat[t] - discharge_to_demand[t] +
+                  pv_to_bat[t] for t in Ts[1:]), name='Bat_Soc')
+    
+    m.addConstrs((bat_soc[t] - bat_soc[t-1] <= data['chargeRate'] for t in Ts[1:]), 
+                 name='charge rate')
+    
+    m.addConstrs((bat_soc[t-1] - bat_soc[t] <= data['dischargeRate'] for t in Ts[1:]), 
+                 name='discharge rate')
+
+    m.addConstrs((data['demand'][t] == discharge_to_demand[t]*data['dischargingEfficiency']
+                  + import_to_demand[t] + pv_to_demand[t] for t in Ts),name='Demand_Constraint')
+    
+    m.addConstrs((data['pv'][t] >= pv_to_bat[t] + pv_to_demand[t] for t in Ts), 
+                 name='PV_Constraint')
+
+    m.addConstrs((Import[t] == import_to_bat[t]/data['chargingEfficiency'] + import_to_demand[t] for t in Ts), 
+                 name='Import_Constraint_1')
+
+    m.setObjective(quicksum(Import[t]*data['importTariff'][t] for t in Ts), GRB.MINIMIZE)      
+    m.optimize()
+
+    costs = [0]
+    charging = [bat_soc[0].x-data['initialSoc']]
+    for t in Ts[:-1]:
+        costs.append(costs[-1]+Import[t].x*data['importTariff'][t])
+        charging.append(bat_soc[t+1].x - bat_soc[t].x)
+
+    return charging, costs
