@@ -1,0 +1,220 @@
+import pandas as pd
+import numpy as np
+import random
+from datetime import datetime
+import matplotlib.pyplot as plt
+from gurobipy import *
+
+def optimal_schedule_decision(data,power,capacity,initial_soc):
+    
+
+    m = Model("Scheduling Problem")
+    m.Params.LogToConsole = 0
+    
+    data = {'initialSoc': initial_soc,
+            'capacity': capacity,
+            'dischargingEfficiency': 0.99,
+            'chargingEfficiency': 0.99,
+            'dischargeRate': power,
+            'chargeRate': power,
+            'demand': [i[2] for i in data],
+            'importTariff': [i[1] for i in data],
+            'pv': [i[0] for i in data]
+            }
+    
+    N = len(data['demand'])
+    Ns = range(N)
+    Ts = range(len(data['importTariff'][0]))
+    index = [(n,t) for n in Ns for t in Ts]
+    
+    
+    Import = m.addVars(index, lb=0)
+    bat_soc = m.addVars(index,lb=0,ub=data['capacity'])#,vtype=GRB.INTEGER)
+    import_to_bat = m.addVars(index, lb=0)#, vtype=GRB.INTEGER)
+    pv_to_bat = m.addVars(index, lb=0)#, vtype=GRB.INTEGER)
+    discharge_to_demand = m.addVars(index, lb=0,ub=data['dischargeRate'])#, vtype=GRB.INTEGER)
+    import_to_demand = m.addVars(index, lb=0)
+    pv_to_demand = m.addVars(index, lb=0)
+
+    if N > 1:
+        m.addConstrs((Import[n,0] == Import[0,0] for n in Ns[1:]), name='First_Decision_Import')
+        m.addConstrs((import_to_bat[0,0]+pv_to_bat[0,0]-discharge_to_demand[0,0] == 
+                      import_to_bat[n,0]+pv_to_bat[n,0]-discharge_to_demand[n,0] for n in Ns[1:]), 
+                     name='First_Decision_Charge')
+        m.addConstrs((bat_soc[0,0] == bat_soc[n,0] for n in Ns[1:]), name='First_SOC') 
+        
+        
+        
+    
+    m.addConstr((bat_soc[0,0] == data['initialSoc']+import_to_bat[0,0]-discharge_to_demand[0,0]
+             + pv_to_bat[0,0]), name='Soc_Initial')
+    
+    m.addConstr(bat_soc[0,0] - data['initialSoc'] <= data['chargeRate'], name='charge rate_first')
+    
+    m.addConstr(data['initialSoc'] - bat_soc[0,0] <= data['dischargeRate'], name='discharge rate_first')
+    
+    m.addConstrs((bat_soc[n,t] == bat_soc[n,t-1] + import_to_bat[n,t]*data['chargingEfficiency'] - 
+                  discharge_to_demand[n,t] + pv_to_bat[n,t] for n in Ns for t in Ts[1:]), name='Bat_Soc')
+    
+    m.addConstrs((bat_soc[n,t] - bat_soc[n,t-1] <= data['chargeRate'] for n in Ns for t in Ts[1:]), 
+                 name='charge rate')
+    
+    m.addConstrs((bat_soc[n,t-1] - bat_soc[n,t] <= data['dischargeRate'] for n in Ns for t in Ts[1:]), 
+                 name='discharge rate')
+
+    m.addConstrs((data['demand'][n][t] == discharge_to_demand[n,t]*data['dischargingEfficiency']
+                  + import_to_demand[n,t] + pv_to_demand[n,t] for n in Ns for t in Ts), 
+                 name='Demand_Constraint')
+    
+    m.addConstrs((data['pv'][n][t] >= pv_to_bat[n,t] + pv_to_demand[n,t] for n in Ns for t in Ts), 
+                 name='PV_Constraint')
+
+    m.addConstrs((Import[n,t] == import_to_bat[n,t]/data['chargingEfficiency'] 
+                  + import_to_demand[n,t] for n in Ns for t in Ts), name='Import_Constraint_1')
+
+
+    m.setObjective((1/N)*quicksum(Import[n,t]*data['importTariff'][n][t] for n in Ns for t in Ts), GRB.MINIMIZE)      
+
+    m.optimize()
+
+    return Import[0,0].x, import_to_bat[0,0].x + pv_to_bat[0,0].x - discharge_to_demand[0,0].x*data['dischargingEfficiency']
+    #soc = [[bat_soc[n,t].x for t in Ts] for n in Ns]
+    #action = [[bat_soc[n,0].x-data['initialSoc']]+[bat_soc[n,t].x-bat_soc[n,t-1].x for t in Ts[1:]] for n in Ns]
+    
+    #return soc, action
+    
+
+
+
+def generate_similarity_ECDF(current_data,generation,prices,demands,interval):
+    data = [generation,prices,demands]
+    granularity = [3,2,3]
+    ECDFs = []
+    
+    for i in range(len(data)):
+        historical_data = []
+        
+        for j in range(0,len(data[i]),granularity[i]):
+            t_object = datetime.strptime(data[i][j][0],"%d/%m/%Y  %H:%M")
+            
+            if t_object.hour == interval:
+                distance = np.sqrt(sum((data[i][j+granularity[i]-2][k]-current_data[i][k-1])**2 for k in range(1,len(data[i][j]))))
+                if distance == 0:
+                    continue
+                forecasts = data[i][j+granularity[i]-1]
+                
+                residuals = [data[i][j+granularity[i]-2][k]-data[i][j+granularity[i]-1][k] for k in range(1,len(data[i][j]))]
+                value = sum(sign(l)*(l**2) for l in residuals)
+                
+                historical_data.append([value,residuals,distance])
+        
+        historical_data = sorted(historical_data, key=lambda x: x[0])
+        total_weight = sum(1/i[2] for i in historical_data)
+                
+        p = 0
+        for i in historical_data:
+            similarity = (1/i[2])/total_weight
+            i[2],p = [p,p+similarity], p+similarity
+            
+        ECDFs.append(historical_data)
+        
+    return ECDFs
+
+
+def sign(x):
+    if x < 0:
+        return -1
+    else:
+        return 1
+
+
+def generate_ECDF(generation,prices,demands,interval):
+    
+    data = [generation,prices,demands]
+    granularity = [3,2,3]
+    
+    ECDFs = []
+    
+    for i in range(len(data)):
+        historical_data = []
+        
+        for j in range(0,len(data[i]),granularity[i]):
+            t_object = datetime.strptime(data[i][j][0],"%d/%m/%Y  %H:%M")
+            
+            if t_object.hour+t_object.minute == interval:
+                residuals = [data[i][j+granularity[i]-2][k]-data[i][j+granularity[i]-1][k] for k in range(1,len(data[i][j]))]
+                value = sum(sign(l)*(l**2) for l in residuals)
+                historical_data.append([value,residuals])
+        
+        historical_data = sorted(historical_data, key=lambda x: x[0])
+        ECDFs.append(historical_data)
+        
+    return ECDFs
+
+
+def create_all_ECDFs(generation,prices,demands,similarity=False):
+    
+    all_ECDFs = [generate_ECDF(generation,prices,demands,interval) for interval in range(48)]
+    
+    return all_ECDFs
+
+
+def create_sample_paths(current_data,generation,prices,demands,N,interval,similarity=False,ECDFs=None,first=None):
+    
+    if similarity:
+        ECDFs = generate_similarity_ECDF(current_data,generation,prices,demands,interval)
+    elif ECDFs is None:
+        ECDFs = generate_ECDF(generation,prices,demands,interval)
+        
+        
+    random_forecasts = []
+    for n in range(N):
+        temp = []
+        for i in range(3):
+            if similarity:
+                u = random.random()
+                found = False
+                j = 0
+                while not found:
+                    if ECDFs[i][j][2][0] <= u < ECDFs[i][j][2][1]:
+                        found = True
+                        u = j
+                    else: 
+                        j += 1
+                        
+            else:
+                u = random.randint(int(0.05*len(ECDFs[i])),int(0.95*len(ECDFs[i])))
+                
+                
+            if i == 1:
+                if first is not None:
+                    temp.append([first[i]]+[current_data[i][j]-ECDFs[i][u][1][j] for j in range(len(current_data[i])-1)])
+                else:
+                    temp.append([current_data[i][j]-ECDFs[i][u][1][j] for j in range(len(current_data[i]))])
+            else: # only positive PV generation and demand
+                if first is not None:
+                    temp.append([first[i]]+[max(current_data[i][j]-ECDFs[i][u][1][j],0) for j in range(len(current_data[i])-1)])
+                else:
+                    temp.append([max(current_data[i][j]-ECDFs[i][u][1][j],0) for j in range(len(current_data[i]))])
+        
+        random_forecasts.append(temp)
+    
+
+    return random_forecasts
+
+
+def find_starts(generation,prices,demands,interval,begin):
+    data = [generation,prices,demands]
+    granularity = [3,2,3]
+    starts = []
+    
+    for i in range(3):
+        start = begin[i]
+        t_object = datetime.strptime(data[i][start][0],"%d/%m/%Y  %H:%M")
+        while t_object.hour != interval:
+            start += 1
+            t_object = datetime.strptime(data[i][granularity[i]*start][0],"%d/%m/%Y  %H:%M")
+            
+        starts.append((start+1)*granularity[i]+granularity[i]-2)
+        
+    return starts
