@@ -1,0 +1,87 @@
+import numpy as np
+    
+    
+    
+# Create State, will be of format [[demand,price],probability], if probability > 0
+def get_distribution(prices,demands):
+    omega = [[] for t in range(48)]
+    
+    days = int(len(prices)/48)
+    
+    # Get empirical distributions
+    for t in range(48):
+        for d in range(days):
+            demand, price = demands[48*d+t], prices[48*d+t]
+            exist = False
+            for occ in omega[t]:
+                if demand == occ[0][0] and price == occ[0][1]:
+                    occ[1] += 1/days
+                    exist = True
+                    break
+                
+            if not exist:
+                omega[t].append([[demand,price],1/days])
+                
+    return omega
+
+      
+# Define an action set for each battery soc, and consumer demand            
+def action_set(soc,demand,power,capacity):
+    minimum = max(0,soc-demand,soc-power) # power changed
+    maximum = min(capacity,soc+power) # power changed
+    actions = np.arange(minimum-soc, maximum+1-soc, 1)
+    return actions
+
+
+# Intialise optimal action set, for each battery soc for each state
+# Optimal action state and soc is optimal_action[interval][state*(capacity+1)+soc]
+
+# Write Value Iteration Algorithm
+def find_policy(omega,prices,demands,epsilon,delta,power,capacity):
+    
+    max_change = 1
+    
+    #optimal_action = [[[0 for i in range(capacity+1)] for j in range(len(omega[t]))] 
+                     # for t in range(48)]
+
+    # Initialise value states, for each soc level
+    state_value = [[[10**6 for i in range(capacity+1)] for j in range(len(omega[t]))] 
+                   for t in range(48)]
+    
+    
+    while max_change > epsilon:
+        max_change = 0
+        for soc in range(0,capacity+1): # Iterate over every possible soc level
+    
+            for t in range(48): # For each interval
+                next_ = 0 if t == 47 else t+1
+                for state in range(len(omega[t])): # For each state in that interval
+                
+                    demand, price = omega[t][state][0][0], omega[t][state][0][1]
+                    actions = action_set(soc,demand,power,capacity)
+                    
+                    best_value, best_action = 10**6, 0
+                    for a in actions:
+                        a = int(a)
+                        new_value = ((demand+a)*price + delta*sum(omega[next_][s][1]*state_value[next_][s][soc+a] 
+                                                          for s in range(len(omega[next_]))))
+                        
+                        if new_value < best_value:
+                            best_value, best_action = new_value, a
+                    
+                    change = best_value - state_value[t][state][soc]
+                    
+                    #optimal_action[t][state][soc] = best_action
+                    state_value[t][state][soc] = best_value
+                    
+                    max_change = max(max_change,abs(change))
+            
+                    
+    return state_value
+
+
+def MDP_wrapper(prices_train,demands_train,capacity,power,delta,epsilon):
+    omega = get_distribution(prices_train,demands_train)  
+    state_value = find_policy(omega,prices_train,demands_train,epsilon,delta,power,capacity) 
+    
+    return omega, state_value
